@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Send, LogOut, Loader2, Sparkles } from 'lucide-react';
 import { useChatStore } from '@/lib/store';
@@ -10,7 +10,9 @@ import type { Message, ApiResponse } from '@shared/types';
 import { toast } from 'sonner';
 export const ChatInterface: React.FC = () => {
   const [input, setInput] = useState('');
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const scrollBottomRef = useRef<HTMLDivElement>(null);
+  const isAtBottom = useRef(true);
   const user = useChatStore((s) => s.user);
   const token = useChatStore((s) => s.token);
   const logout = useChatStore((s) => s.logout);
@@ -29,40 +31,68 @@ export const ChatInterface: React.FC = () => {
       return json.data ?? [];
     },
     refetchInterval: 2000,
-    enabled: !!token,
+    enabled: !!token && !!user,
   });
   const sendMessage = useMutation({
     mutationFn: async (text: string) => {
       const res = await fetch('/api/chat/messages', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({ text }),
       });
-      if (res.status === 401) {
-        logout();
-        throw new Error('Session expired');
+      if (!res.ok) {
+        if (res.status === 401) logout();
+        const errData = await res.json() as ApiResponse;
+        throw new Error(errData.error || 'Failed to send');
       }
+      return (await res.json() as ApiResponse<Message[]>).data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['messages', user?.id] });
+    onMutate: async (text) => {
+      await queryClient.cancelQueries({ queryKey: ['messages', user?.id] });
+      const previousMessages = queryClient.getQueryData<Message[]>(['messages', user?.id]);
+      const optimisticMessage: Message = {
+        id: `optimistic-${Date.now()}`,
+        text,
+        sender: user?.username || 'Me',
+        timestamp: Date.now(),
+        userId: user?.id
+      };
+      queryClient.setQueryData(['messages', user?.id], [...(previousMessages || []), optimisticMessage]);
+      isAtBottom.current = true;
+      return { previousMessages };
     },
-    onError: (err) => {
+    onError: (err, _text, context) => {
+      if (context?.previousMessages) {
+        queryClient.setQueryData(['messages', user?.id], context.previousMessages);
+      }
       toast.error(err.message || 'Failed to send message');
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['messages', user?.id] });
     }
   });
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || sendMessage.isPending) return;
-    sendMessage.mutate(input.trim());
+    const text = input.trim();
+    if (!text || sendMessage.isPending) return;
+    sendMessage.mutate(text);
     setInput('');
   };
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    const isCloseToBottom = scrollHeight - scrollTop - clientHeight < 50;
+    isAtBottom.current = isCloseToBottom;
+  };
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (isAtBottom.current && scrollBottomRef.current) {
+      scrollBottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+  }, [messages]);
+  const sortedMessages = useMemo(() => {
+    return [...messages].sort((a, b) => a.timestamp - b.timestamp);
   }, [messages]);
   return (
     <div className="flex flex-col h-screen max-w-3xl mx-auto bg-background border-x relative">
@@ -77,40 +107,42 @@ export const ChatInterface: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <div className="hidden sm:flex flex-col items-end">
+          <div className="hidden sm:flex flex-col items-end text-right">
             <span className="text-xs font-semibold">{user?.username}</span>
             <span className="text-[10px] text-muted-foreground">Session Active</span>
           </div>
-          <Button variant="ghost" size="icon" onClick={logout} className="rounded-full hover:bg-destructive/10 hover:text-destructive">
+          <Button variant="ghost" size="icon" onClick={logout} className="rounded-full hover:bg-destructive/10 hover:text-destructive transition-colors">
             <LogOut className="w-4 h-4" />
           </Button>
         </div>
       </header>
-      <ScrollArea className="flex-1 px-4 py-6">
-        {isLoading && messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full space-y-4 py-20">
-            <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-            <p className="text-sm text-muted-foreground">Retrieving history...</p>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full py-20 text-center opacity-40">
-            <Sparkles className="w-12 h-12 mb-4 text-indigo-400" />
-            <p className="text-sm">Start your private conversation</p>
-          </div>
-        ) : (
-          <div className="space-y-1">
-            {messages.map((msg) => (
-              <MessageBubble
-                key={msg.id}
-                sender={msg.sender}
-                text={msg.text}
-                timestamp={msg.timestamp}
-                isSelf={true} // In private logs, sender is always self or system
-              />
-            ))}
-            <div ref={scrollRef} />
-          </div>
-        )}
+      <ScrollArea className="flex-1 px-4 py-6" onScrollCapture={handleScroll}>
+        <div className="flex flex-col min-h-full">
+          {isLoading && sortedMessages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center flex-1 space-y-4 py-20">
+              <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+              <p className="text-sm text-muted-foreground">Retrieving history...</p>
+            </div>
+          ) : sortedMessages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center flex-1 py-20 text-center opacity-40">
+              <Sparkles className="w-12 h-12 mb-4 text-indigo-400" />
+              <p className="text-sm">Start your private conversation</p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {sortedMessages.map((msg) => (
+                <MessageBubble
+                  key={msg.id}
+                  sender={msg.sender}
+                  text={msg.text}
+                  timestamp={msg.timestamp}
+                  isSelf={msg.sender === user?.username}
+                />
+              ))}
+              <div ref={scrollBottomRef} />
+            </div>
+          )}
+        </div>
       </ScrollArea>
       <div className="p-4 sm:p-6 bg-gradient-to-t from-background via-background/95 to-transparent">
         <form onSubmit={handleSend} className="relative flex items-center gap-3">
@@ -123,7 +155,7 @@ export const ChatInterface: React.FC = () => {
           <Button
             type="submit"
             disabled={!input.trim() || sendMessage.isPending}
-            className="rounded-2xl w-12 h-12 bg-indigo-600 hover:bg-indigo-700 text-white p-0 shadow-lg shadow-indigo-500/30 transition-all active:scale-95"
+            className="rounded-2xl w-12 h-12 bg-indigo-600 hover:bg-indigo-700 text-white p-0 shadow-lg shadow-indigo-500/30 transition-all active:scale-95 flex-shrink-0"
           >
             {sendMessage.isPending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
           </Button>

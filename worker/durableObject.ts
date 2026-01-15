@@ -6,11 +6,9 @@ interface UserRecord extends User {
 }
 export class GlobalDurableObject extends DurableObject {
     private readonly MAX_MESSAGES = 100;
-    // Helper: Simple session token generator
     private generateToken(): string {
       return crypto.randomUUID();
     }
-    // Helper: PBKDF2 Password Hashing using Web Crypto
     private async hashPassword(password: string, salt: string): Promise<string> {
       const encoder = new TextEncoder();
       const passwordKey = await crypto.subtle.importKey(
@@ -33,18 +31,20 @@ export class GlobalDurableObject extends DurableObject {
       return btoa(String.fromCharCode(...new Uint8Array(derivedBits)));
     }
     async register(username: string, password: string): Promise<{ user: User; token: string } | null> {
+      const cleanUsername = username.trim();
+      if (cleanUsername.length < 3 || password.length < 6) return null;
       const users = (await this.ctx.storage.get<Record<string, UserRecord>>("auth_users")) || {};
-      if (users[username]) return null;
+      if (users[cleanUsername]) return null;
       const salt = crypto.randomUUID();
       const passwordHash = await this.hashPassword(password, salt);
       const user: UserRecord = {
         id: crypto.randomUUID(),
-        username,
+        username: cleanUsername,
         createdAt: Date.now(),
         passwordHash,
         salt
       };
-      users[username] = user;
+      users[cleanUsername] = user;
       await this.ctx.storage.put("auth_users", users);
       const token = this.generateToken();
       const sessions = (await this.ctx.storage.get<Record<string, string>>("auth_sessions")) || {};
@@ -54,8 +54,9 @@ export class GlobalDurableObject extends DurableObject {
       return { user: publicUser, token };
     }
     async login(username: string, password: string): Promise<{ user: User; token: string } | null> {
+      const cleanUsername = username.trim();
       const users = (await this.ctx.storage.get<Record<string, UserRecord>>("auth_users")) || {};
-      const user = users[username];
+      const user = users[cleanUsername];
       if (!user) return null;
       const hash = await this.hashPassword(password, user.salt);
       if (hash !== user.passwordHash) return null;
@@ -81,11 +82,13 @@ export class GlobalDurableObject extends DurableObject {
       return messages;
     }
     async addMessage(userId: string, sender: string, text: string): Promise<Message[]> {
+      const cleanText = text.trim();
+      if (!cleanText) return await this.getMessages(userId);
       const messages = await this.getMessages(userId);
       const newMessage: Message = {
         id: crypto.randomUUID(),
         sender,
-        text,
+        text: cleanText,
         timestamp: Date.now(),
         userId
       };
