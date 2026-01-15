@@ -4,7 +4,7 @@
  */
  {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "luma-chat-m85tlcc3jfytkyphfvdz8",
+	"name": "luma-chat",
 	"main": "worker/index.ts",
 	"compatibility_date": "2025-04-24",
 	"assets": {
