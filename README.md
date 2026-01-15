@@ -1,6 +1,6 @@
 # Luma Chat
 
-[cloudflarebutton]
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/myschoolstory/luma-chat)
 
 A production-ready fullstack chat application built on Cloudflare Workers and Pages. Features a modern React frontend with shadcn/ui, TailwindCSS, and a Hono-powered backend with Durable Objects for persistent storage.
 
@@ -122,7 +122,7 @@ Responses: `{ success: boolean, data?: T, error?: string }`
    ```
 
 3. **One-Click Deploy**:
-   [cloudflarebutton]
+   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/myschoolstory/luma-chat)
 
 4. **Custom Domain** (Wrangler):
    ```bash
