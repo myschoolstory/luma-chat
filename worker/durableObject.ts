@@ -1,31 +1,96 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Message } from '@shared/types';
+import type { Message, User } from '@shared/types';
+interface UserRecord extends User {
+  passwordHash: string;
+  salt: string;
+}
 export class GlobalDurableObject extends DurableObject {
-    private readonly MAX_MESSAGES = 50;
-    async getMessages(): Promise<Message[]> {
-      const messages = (await this.ctx.storage.get<Message[]>("chat_messages")) || [];
+    private readonly MAX_MESSAGES = 100;
+    // Helper: Simple session token generator
+    private generateToken(): string {
+      return crypto.randomUUID();
+    }
+    // Helper: PBKDF2 Password Hashing using Web Crypto
+    private async hashPassword(password: string, salt: string): Promise<string> {
+      const encoder = new TextEncoder();
+      const passwordKey = await crypto.subtle.importKey(
+        "raw",
+        encoder.encode(password),
+        { name: "PBKDF2" },
+        false,
+        ["deriveBits", "deriveKey"]
+      );
+      const derivedBits = await crypto.subtle.deriveBits(
+        {
+          name: "PBKDF2",
+          salt: encoder.encode(salt),
+          iterations: 100000,
+          hash: "SHA-256",
+        },
+        passwordKey,
+        256
+      );
+      return btoa(String.fromCharCode(...new Uint8Array(derivedBits)));
+    }
+    async register(username: string, password: string): Promise<{ user: User; token: string } | null> {
+      const users = (await this.ctx.storage.get<Record<string, UserRecord>>("auth_users")) || {};
+      if (users[username]) return null;
+      const salt = crypto.randomUUID();
+      const passwordHash = await this.hashPassword(password, salt);
+      const user: UserRecord = {
+        id: crypto.randomUUID(),
+        username,
+        createdAt: Date.now(),
+        passwordHash,
+        salt
+      };
+      users[username] = user;
+      await this.ctx.storage.put("auth_users", users);
+      const token = this.generateToken();
+      const sessions = (await this.ctx.storage.get<Record<string, string>>("auth_sessions")) || {};
+      sessions[token] = user.id;
+      await this.ctx.storage.put("auth_sessions", sessions);
+      const { passwordHash: _, salt: __, ...publicUser } = user;
+      return { user: publicUser, token };
+    }
+    async login(username: string, password: string): Promise<{ user: User; token: string } | null> {
+      const users = (await this.ctx.storage.get<Record<string, UserRecord>>("auth_users")) || {};
+      const user = users[username];
+      if (!user) return null;
+      const hash = await this.hashPassword(password, user.salt);
+      if (hash !== user.passwordHash) return null;
+      const token = this.generateToken();
+      const sessions = (await this.ctx.storage.get<Record<string, string>>("auth_sessions")) || {};
+      sessions[token] = user.id;
+      await this.ctx.storage.put("auth_sessions", sessions);
+      const { passwordHash: _, salt: __, ...publicUser } = user;
+      return { user: publicUser, token };
+    }
+    async verifySession(token: string): Promise<User | null> {
+      const sessions = (await this.ctx.storage.get<Record<string, string>>("auth_sessions")) || {};
+      const userId = sessions[token];
+      if (!userId) return null;
+      const users = (await this.ctx.storage.get<Record<string, UserRecord>>("auth_users")) || {};
+      const userRecord = Object.values(users).find(u => u.id === userId);
+      if (!userRecord) return null;
+      const { passwordHash: _, salt: __, ...publicUser } = userRecord;
+      return publicUser;
+    }
+    async getMessages(userId: string): Promise<Message[]> {
+      const messages = (await this.ctx.storage.get<Message[]>(`msgs:${userId}`)) || [];
       return messages;
     }
-    async addMessage(sender: string, text: string): Promise<Message[]> {
-      const messages = await this.getMessages();
+    async addMessage(userId: string, sender: string, text: string): Promise<Message[]> {
+      const messages = await this.getMessages(userId);
       const newMessage: Message = {
         id: crypto.randomUUID(),
         sender,
         text,
         timestamp: Date.now(),
+        userId
       };
       const updatedMessages = [...messages, newMessage].slice(-this.MAX_MESSAGES);
-      await this.ctx.storage.put("chat_messages", updatedMessages);
+      await this.ctx.storage.put(`msgs:${userId}`, updatedMessages);
       return updatedMessages;
-    }
-    // Keeping boilerplate methods for compatibility if needed, though chat is primary
-    async getCounterValue(): Promise<number> {
-      return (await this.ctx.storage.get<number>("counter_value")) || 0;
-    }
-    async increment(amount = 1): Promise<number> {
-      let value: number = (await this.ctx.storage.get<number>("counter_value")) || 0;
-      value += amount;
-      await this.ctx.storage.put("counter_value", value);
-      return value;
     }
 }
